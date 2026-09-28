@@ -1,0 +1,759 @@
+#!/usr/bin/env python3
+"""Memory Sidecar CLI v3.5.1 — multi-agent compatible."""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+import py_compile
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+AGENT_HOME = Path(os.environ.get("AGENT_HOME") or os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
+SCRIPTS_DIR = AGENT_HOME / "scripts"
+PROFILE_PATH = AGENT_HOME / "memory-sidecar" / "install-profile.json"
+DEFAULT_GRAY_DIR = AGENT_HOME / "gray" / "memory-sidecar"
+STANDARD_KMM_NOTES_REL = Path("knowledge/notes")
+LEGACY_KMM_NOTES_REL = Path("knowledge/wiki/wiki")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_SCRIPTS_DIR = REPO_ROOT / "scripts"
+CORE_DEPLOY_SCRIPTS = [
+    "query_expansion.py",
+    "memory_family_registry.py",
+    "session_to_gbrain.py",
+    "memory_governance_rebuild.py",
+    "memory_guardian.py",
+    "memory_maintenance_cycle.py",
+    "sidecar_acceptance_check.py",
+    "tiered_context_injector.py",
+    "archive_sessions.py",
+    "auto_session_summary.py",
+    "gbrain_deorphan_index.py",
+    "memory_observability_report.py",
+    "memory_eval_report.py",
+    "memory_storage_cross_check.py",
+    "state_db_schema.py",
+    "knowledge_notes.py",
+    "recall_samples.py",
+    "langsmith_monitor.py",
+    "langsmith_task_wrapper.py",
+    "langsmith_trend_report.py",
+    "live_hindsight_refresh_worker.py",
+    "runtime_drift_check.py",
+    "gbrain_stale_maintenance.py",
+    "alert_queue.py",
+    "alert_webhook_receiver.py",
+    "telegram_language_sync.py",
+    "prometheus_alert_bridge.py",
+    "metrics_dashboard.py",
+    "metrics_dashboard_server.py",
+    "openmetrics_exporter.py",
+    "slo_rollup.py",
+    "profile_isolation_soak.py",
+    "hindsight_security_audit.py",
+    "synthetic_recall_benchmark.py",
+    "auto_archive_sessions.py",
+    "profile_isolation_check.py",
+    "rotate_dashboard_token.py",
+    "system_metrics_collector.py",
+    "hermes_load_shedder.py",
+    "snapshot_retention.py",
+    "cron_freshness.py",
+    "snapshot_compress.py",
+    "snapshot_restore.py",
+]
+REQUIRED_REPO_FILES = [
+    "README.md",
+    "README_CN.md",
+    "ARCHITECTURE.md",
+    "ARCHITECTURE_CN.md",
+    "MANUAL_INSTALL.md",
+    "LICENSE",
+    "install.sh",
+    "install_cli.sh",
+    "installer/install.py",
+    "bin/hermes-memory",
+]
+TEXT_SUFFIXES = {".py", ".md", ".sh", ".yaml", ".yml", ".json", ".j2"}
+TEXT_SCAN_EXCLUDED_PARTS = {".git", ".pytest_cache", "__pycache__", ".benchmarks"}
+SECRET_PATTERNS = {
+    "github_pat": r"github_pat_[A-Za-z0-9_]+",
+    "ghp": r"\bghp_[A-Za-z0-9]+\b",
+    "openai_sk": r"\bsk-[A-Za-z0-9]{20,}\b",
+    "langsmith_key": r"\blsv2_[A-Za-z0-9_]+\b",
+    "env_openai_api_key": r"OPENAI_API_KEY\s*=",
+    "env_langsmith_api_key": r"LANGSMITH_API_KEY\s*=",
+}
+PRIVATE_PATH_PATTERNS = {
+    "root_hermes": r"/root/\." + r"hermes",
+    "root_repo": r"/root/" + r"hermes-memory-installer",
+}
+
+
+def run_script(script_name: str, extra_args: list[str] | None = None) -> int:
+    script = SCRIPTS_DIR / script_name
+    if not script.exists():
+        print(f"Missing script: {script}")
+        return 1
+    result = subprocess.run([sys.executable, str(script), *(extra_args or [])], text=True)
+    return result.returncode
+
+
+def cmd_doctor(_: argparse.Namespace) -> int:
+    checks = {
+        "agent_home": AGENT_HOME.exists(),
+        "scripts_dir": SCRIPTS_DIR.exists(),
+        "install_profile": PROFILE_PATH.exists(),
+        "maintenance_cycle": (SCRIPTS_DIR / "memory_maintenance_cycle.py").exists(),
+        "acceptance_check": (SCRIPTS_DIR / "sidecar_acceptance_check.py").exists(),
+    }
+    for name, ok in checks.items():
+        print(f"{name}: {'ok' if ok else 'missing'}")
+    return 0 if all(checks.values()) else 1
+
+
+def cmd_profile(_: argparse.Namespace) -> int:
+    if not PROFILE_PATH.exists():
+        print(f"Install profile not found: {PROFILE_PATH}")
+        return 1
+    payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_maintenance(_: argparse.Namespace) -> int:
+    return run_script("memory_maintenance_cycle.py")
+
+
+def cmd_acceptance(args: argparse.Namespace) -> int:
+    return run_script("sidecar_acceptance_check.py", ["--mode", args.mode])
+
+
+def cmd_gray_env(args: argparse.Namespace) -> int:
+    gray_dir = Path(args.gray_dir).expanduser() if args.gray_dir else DEFAULT_GRAY_DIR
+    governance_db = gray_dir / "memory_governance.gray.db"
+    context_path = gray_dir / "TIERED_CONTEXT.gray.md"
+    recall_path = gray_dir / "PROACTIVE_RECALL.gray.md"
+    standard_notes = AGENT_HOME / STANDARD_KMM_NOTES_REL
+    legacy_notes = AGENT_HOME / LEGACY_KMM_NOTES_REL
+    print(f"export AGENT_HOME={AGENT_HOME}")
+    print(f"export MEMORY_STATE_DB_PATH={AGENT_HOME / 'state.db'}")
+    print(f"export MEMORY_GOVERNANCE_DB_PATH={governance_db}")
+    print(f"# Preferred KMM notes dir: {standard_notes}")
+    print(f"# Legacy KMM wiki dir: {legacy_notes}")
+    print(f"export MEMORY_KNOWLEDGE_NOTES_DIR={standard_notes}")
+    print(f"export MEMORY_OUTPUT_CONTEXT_PATH={context_path}")
+    print(f"export MEMORY_OUTPUT_RECALL_PATH={recall_path}")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    script = SCRIPTS_DIR / "memory_observability_report.py"
+    if not script.exists():
+        print(f"Missing script: {script}")
+        return 1
+    db_path = args.db or str(AGENT_HOME / "memory_governance.db")
+    result = subprocess.run(
+        [sys.executable, str(script), "--db", db_path, "--format", args.format],
+        text=True,
+    )
+    return result.returncode
+
+
+def sha256_file(path: Path) -> str | None:
+    if not path.exists() or not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def run_capture(cmd: list[str], timeout: int = 10) -> tuple[int, str]:
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return 127, ""
+    except subprocess.TimeoutExpired:
+        return 124, ""
+    return result.returncode, (result.stdout + result.stderr).strip()
+
+
+def iter_repo_text_files(repo_root: Path):
+    for path in repo_root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(repo_root)
+        if any(part in TEXT_SCAN_EXCLUDED_PARTS for part in rel.parts):
+            continue
+        if "tests" in rel.parts:
+            continue
+        if path.suffix.lower() not in TEXT_SUFFIXES:
+            continue
+        yield path
+
+
+def pattern_hits(content: str, patterns: dict[str, str]) -> list[str]:
+    hits = []
+    for name, pattern in patterns.items():
+        if re.search(pattern, content):
+            hits.append(name)
+    return hits
+
+
+def build_repo_audit(repo_root: Path) -> dict:
+    missing_required_files = [path for path in REQUIRED_REPO_FILES if not (repo_root / path).exists()]
+    private_path_refs = []
+    secret_like_refs = []
+    scanned_files = 0
+
+    for path in iter_repo_text_files(repo_root):
+        scanned_files += 1
+        rel = str(path.relative_to(repo_root))
+        content = path.read_text(encoding="utf-8", errors="replace")
+        private_hits = pattern_hits(content, PRIVATE_PATH_PATTERNS)
+        if private_hits:
+            private_path_refs.append({"path": rel, "matches": private_hits})
+        secret_hits = pattern_hits(content, SECRET_PATTERNS)
+        if secret_hits:
+            secret_like_refs.append({"path": rel, "matches": secret_hits})
+
+    compile_failures = []
+    compile_targets = [
+        repo_root / "installer" / "install.py",
+        repo_root / "installer" / "check_env.py",
+        repo_root / "installer" / "config_patch.py",
+        repo_root / "bin" / "hermes-memory",
+    ]
+    compile_targets.extend(repo_root / "scripts" / name for name in CORE_DEPLOY_SCRIPTS)
+    for path in compile_targets:
+        try:
+            py_compile.compile(str(path), doraise=True)
+        except Exception as exc:
+            compile_failures.append({"path": str(path.relative_to(repo_root)), "error": str(exc)})
+
+    ok = not (missing_required_files or private_path_refs or secret_like_refs or compile_failures)
+    return {
+        "repo_root": str(repo_root),
+        "scanned_files": scanned_files,
+        "missing_required_files": missing_required_files,
+        "private_path_refs": private_path_refs,
+        "secret_like_refs": secret_like_refs,
+        "compile_failures": compile_failures,
+        "ok": ok,
+    }
+
+
+def build_deploy_audit(repo_root: Path) -> dict:
+    repo_scripts_dir = repo_root / "scripts"
+    script_rows = []
+    missing = []
+    mismatched = []
+    for name in CORE_DEPLOY_SCRIPTS:
+        deployed_path = SCRIPTS_DIR / name
+        repo_path = repo_scripts_dir / name
+        deployed_hash = sha256_file(deployed_path)
+        repo_hash = sha256_file(repo_path)
+        row = {
+            "name": name,
+            "deployed": deployed_hash is not None,
+            "deployed_hash": deployed_hash,
+            "repo_hash": repo_hash,
+            "matches_repo": deployed_hash == repo_hash if repo_hash and deployed_hash else None,
+        }
+        script_rows.append(row)
+        if deployed_hash is None:
+            missing.append(name)
+        elif repo_hash and deployed_hash != repo_hash:
+            mismatched.append(name)
+
+    cron_code, cron_text = run_capture(["crontab", "-l"], timeout=10)
+    cron_available = cron_code == 0
+    cron_lines = cron_text.splitlines() if cron_available else []
+    relevant_cron = [
+        line for line in cron_lines
+        if any(
+            token in line
+            for token in (
+                "langsmith",
+                "runtime-drift-check",
+                "alert-queue",
+                "gbrain-bulk-deorphan",
+                "memory_guardian",
+                "session_to_gbrain",
+                "archive_sessions",
+            )
+        )
+    ]
+
+    timer_active_code, timer_active = run_capture(["systemctl", "is-active", "memory-guardian.timer"], timeout=10)
+    timer_enabled_code, timer_enabled = run_capture(["systemctl", "is-enabled", "memory-guardian.timer"], timeout=10)
+
+    return {
+        "agent_home": str(AGENT_HOME),
+        "scripts_dir": str(SCRIPTS_DIR),
+        "repo_root": str(repo_root),
+        "scripts": script_rows,
+        "missing_scripts": missing,
+        "mismatched_scripts": mismatched,
+        "cron_available": cron_available,
+        "relevant_cron": relevant_cron,
+        "langsmith_uses_gray_path": any("/gray/" in line and "langsmith" in line for line in relevant_cron),
+        "gbrain_deorphan_scheduled": any("gbrain-bulk-deorphan-wrapper.sh" in line for line in relevant_cron),
+        "memory_guardian_timer": {
+            "active": timer_active if timer_active_code == 0 else "unknown",
+            "enabled": timer_enabled if timer_enabled_code == 0 else "unknown",
+        },
+    }
+
+
+def detect_wrapper_mode(wrapper_text: str) -> str:
+    if not wrapper_text:
+        return "missing"
+    if "${AGENT_HOME:-" in wrapper_text and '"$@"' in wrapper_text:
+        return "env_default_safe"
+    if "export AGENT_HOME=" in wrapper_text and "${AGENT_HOME:-" not in wrapper_text:
+        return "hardcoded_env"
+    return "custom"
+
+
+def build_manifest(repo_root: Path) -> dict:
+    audit = build_deploy_audit(repo_root)
+    install_profile = None
+    if PROFILE_PATH.exists():
+        try:
+            install_profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            install_profile = {"error": "unreadable_install_profile"}
+
+    wrapper_path = Path("/usr/local/bin/hermes-memory")
+    wrapper_text = ""
+    if wrapper_path.exists():
+        try:
+            wrapper_text = wrapper_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            wrapper_text = ""
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "agent_home": audit["agent_home"],
+        "scripts_dir": audit["scripts_dir"],
+        "repo_root": audit["repo_root"],
+        "wrapper": {
+            "path": str(wrapper_path),
+            "exists": wrapper_path.exists(),
+            "sha256": sha256_file(wrapper_path),
+            "mode": detect_wrapper_mode(wrapper_text),
+        },
+        "install_profile": install_profile,
+        "deploy_audit": audit,
+    }
+
+
+def git_status(repo_root: Path) -> dict:
+    code, text = run_capture(["git", "-C", str(repo_root), "status", "--short"], timeout=10)
+    return {
+        "available": code == 0,
+        "dirty": bool(text.strip()) if code == 0 else None,
+        "lines": text.splitlines() if code == 0 and text else [],
+    }
+
+
+def repo_dirty_reason(repo: dict, deploy: dict) -> dict | None:
+    if not repo.get("dirty"):
+        return None
+    deployed_content_clean = not deploy.get("missing_scripts") and not deploy.get("mismatched_scripts")
+    severity = "info" if deployed_content_clean else "degraded"
+    return {"code": "repo_dirty", "severity": severity, "count": len(repo.get("lines") or [])}
+
+
+def build_runtime_drift_report(repo_root: Path) -> dict:
+    manifest = build_manifest(repo_root)
+    deploy = manifest["deploy_audit"]
+    wrapper = manifest["wrapper"]
+    timer = deploy["memory_guardian_timer"]
+    repo = git_status(repo_root)
+    reasons = []
+
+    if deploy["missing_scripts"]:
+        reasons.append({"code": "missing_scripts", "severity": "action-needed", "count": len(deploy["missing_scripts"])})
+    if deploy["mismatched_scripts"]:
+        reasons.append({"code": "mismatched_scripts", "severity": "action-needed", "count": len(deploy["mismatched_scripts"])})
+    if wrapper["mode"] != "env_default_safe":
+        reasons.append({"code": "wrapper_mode", "severity": "action-needed", "value": wrapper["mode"]})
+    if deploy["langsmith_uses_gray_path"]:
+        reasons.append({"code": "langsmith_gray_cron", "severity": "action-needed"})
+    if not deploy["gbrain_deorphan_scheduled"]:
+        reasons.append({"code": "gbrain_deorphan_unscheduled", "severity": "degraded"})
+    if timer.get("active") != "active" or timer.get("enabled") != "enabled":
+        reasons.append({"code": "memory_guardian_timer", "severity": "degraded", "value": timer})
+    dirty_reason = repo_dirty_reason(repo, deploy)
+    if dirty_reason:
+        reasons.append(dirty_reason)
+
+    status = "healthy"
+    if any(item["severity"] == "action-needed" for item in reasons):
+        status = "action-needed"
+    elif any(item["severity"] == "degraded" for item in reasons):
+        status = "degraded"
+
+    return {
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "ok": status == "healthy",
+        "reasons": reasons,
+        "repo_status": repo,
+        "manifest": manifest,
+    }
+
+
+def default_metrics_path(filename: str) -> Path:
+    return AGENT_HOME / "metrics" / filename
+
+
+def load_json_file(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_json_if_requested(path_value: str | None, payload: dict) -> None:
+    if not path_value:
+        return
+    path = Path(path_value).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def cmd_audit_deploy(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo_root).expanduser() if args.repo_root else REPO_ROOT
+    audit = build_deploy_audit(repo_root)
+    if args.format == "json":
+        print(json.dumps(audit, ensure_ascii=False, indent=2))
+    else:
+        print(f"Agent home: {audit['agent_home']}")
+        print(f"Scripts dir: {audit['scripts_dir']}")
+        print(f"Missing scripts: {len(audit['missing_scripts'])}")
+        print(f"Mismatched scripts: {len(audit['mismatched_scripts'])}")
+        print(f"LangSmith gray cron reference: {audit['langsmith_uses_gray_path']}")
+        print(f"gbrain deorphan scheduled: {audit['gbrain_deorphan_scheduled']}")
+        timer = audit["memory_guardian_timer"]
+        print(f"memory-guardian.timer: active={timer['active']} enabled={timer['enabled']}")
+    failed = bool(audit["missing_scripts"] or audit["langsmith_uses_gray_path"])
+    return 1 if failed else 0
+
+
+def cmd_audit_repo(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo_root).expanduser() if args.repo_root else REPO_ROOT
+    audit = build_repo_audit(repo_root)
+    if args.format == "json":
+        print(json.dumps(audit, ensure_ascii=False, indent=2))
+    else:
+        print(f"Repo root: {audit['repo_root']}")
+        print(f"Scanned files: {audit['scanned_files']}")
+        print(f"Missing required files: {len(audit['missing_required_files'])}")
+        print(f"Private path refs: {len(audit['private_path_refs'])}")
+        print(f"Secret-like refs: {len(audit['secret_like_refs'])}")
+        print(f"Compile failures: {len(audit['compile_failures'])}")
+    return 0 if audit["ok"] else 1
+
+
+def cmd_manifest(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo_root).expanduser() if args.repo_root else REPO_ROOT
+    manifest = build_manifest(repo_root)
+    if args.format == "json":
+        print(json.dumps(manifest, ensure_ascii=False, indent=2))
+    else:
+        deploy = manifest["deploy_audit"]
+        wrapper = manifest["wrapper"]
+        print(f"Agent home: {manifest['agent_home']}")
+        print(f"Scripts dir: {manifest['scripts_dir']}")
+        print(f"Wrapper mode: {wrapper['mode']}")
+        print(f"Missing scripts: {len(deploy['missing_scripts'])}")
+        print(f"Mismatched scripts: {len(deploy['mismatched_scripts'])}")
+        print(f"Cron entries: {len(deploy['relevant_cron'])}")
+    return 0
+
+
+def cmd_drift_check(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo_root).expanduser() if args.repo_root else REPO_ROOT
+    output = args.output or str(default_metrics_path("runtime-drift-latest.json"))
+    report = build_runtime_drift_report(repo_root)
+    write_json_if_requested(output, report)
+    if args.format == "json":
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(f"Status: {report['status']}")
+        print(f"Reasons: {len(report['reasons'])}")
+        for reason in report["reasons"]:
+            detail = reason.get("count", reason.get("value", ""))
+            print(f"- {reason['severity']} {reason['code']} {detail}".rstrip())
+        print(f"Output: {output}")
+    return 1 if args.strict and report["status"] == "action-needed" else 0
+
+
+def cmd_dashboard_info(args: argparse.Namespace) -> int:
+    token_file = Path(args.token_file).expanduser() if args.token_file else AGENT_HOME / "private" / "dashboard-token"
+    payload = {
+        "url": args.url,
+        "token_file": str(token_file),
+        "token_configured": token_file.exists() and bool(token_file.read_text(encoding="utf-8", errors="replace").strip()),
+        "note": "Use the token as an Authorization: Bearer value. The token is not printed by this command.",
+    }
+    if args.format == "json":
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"Dashboard URL: {payload['url']}")
+        print(f"Token file: {payload['token_file']}")
+        print(f"Token configured: {payload['token_configured']}")
+        print(payload["note"])
+    return 0 if payload["token_configured"] else 1
+
+
+def cmd_openmetrics(args: argparse.Namespace) -> int:
+    extra_args = ["--metrics-dir", args.metrics_dir] if args.metrics_dir else []
+    if args.output:
+        extra_args.extend(["--output", args.output])
+    return run_script("openmetrics_exporter.py", extra_args)
+
+
+def cmd_slo_rollup(args: argparse.Namespace) -> int:
+    extra_args = ["--metrics-dir", args.metrics_dir] if args.metrics_dir else []
+    if args.output:
+        extra_args.extend(["--output", args.output])
+    if args.history:
+        extra_args.extend(["--history", args.history])
+    if args.no_history:
+        extra_args.append("--no-history")
+    return run_script("slo_rollup.py", extra_args)
+
+
+def format_rate(value) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value) * 100:.1f}%"
+    return "unknown"
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    metrics_dir = Path(args.metrics_dir).expanduser() if args.metrics_dir else AGENT_HOME / "metrics"
+    health = load_json_file(metrics_dir / "health-summary-latest.json")
+    trend = load_json_file(metrics_dir / "langsmith-trend-latest.json")
+    slo = load_json_file(metrics_dir / "slo-rollup-latest.json")
+    webhook = load_json_file(metrics_dir / "webhook-receiver-latest.json")
+    monitor = trend.get("monitor") if isinstance(trend.get("monitor"), dict) else {}
+
+    status = str(health.get("status") or slo.get("status") or "unknown")
+    alerts = health.get("alert_count")
+    if isinstance(health.get("alerts"), list):
+        alerts = sum(
+            1
+            for row in health["alerts"]
+            if isinstance(row, dict) and row.get("severity") in {"action-needed", "degraded"}
+        )
+    elif alerts is None:
+        alerts = 0 if status == "healthy" else None
+    acceptance = slo.get("acceptance_ok_rate", monitor.get("recent_acceptance_ok_rate"))
+    queue_growth = slo.get("alert_queue_growth", "unknown")
+    replay_rate = slo.get("dead_letter_replay_success_rate")
+    recall_latency = slo.get("recall_latency") if isinstance(slo.get("recall_latency"), dict) else {}
+    recall_p95 = recall_latency.get("p95_s")
+    forward = webhook.get("last_forward") if isinstance(webhook.get("last_forward"), dict) else {}
+    forward_ok = "ok" if forward and not forward.get("error") else ("unknown" if not forward else "failed")
+
+    print(
+        f"{status} alerts={alerts if alerts is not None else 'unknown'} "
+        f"acceptance={format_rate(acceptance)} queue_growth={queue_growth} "
+        f"dead_letter_replay={format_rate(replay_rate)} recall_p95_s={recall_p95 if recall_p95 is not None else 'unknown'} "
+        f"forward={forward_ok}"
+    )
+    return 0 if status == "healthy" else 1
+
+
+def cmd_replay_dead_letter(args: argparse.Namespace) -> int:
+    extra_args = ["--replay-dead-letter"]
+    if args.dead_letter:
+        extra_args.extend(["--dead-letter", args.dead_letter])
+    if args.forward_url:
+        extra_args.extend(["--forward-url", args.forward_url])
+    if args.forward_kind:
+        extra_args.extend(["--forward-kind", args.forward_kind])
+    extra_args.extend(["--forward-timeout", str(args.forward_timeout)])
+    extra_args.extend(["--retry-attempts", str(args.retry_attempts)])
+    extra_args.extend(["--retry-backoff-s", str(args.retry_backoff_s)])
+    extra_args.extend(["--max-replay", str(args.max_replay)])
+    if args.dry_run:
+        extra_args.append("--dry-run")
+    if args.output:
+        extra_args.extend(["--output", args.output])
+    return run_script("alert_webhook_receiver.py", extra_args)
+
+
+def cmd_telegram_lang_sync(args: argparse.Namespace) -> int:
+    extra_args = ["--map-path", args.map_path, "--offset-path", args.offset_path]
+    extra_args.extend(["--limit", str(args.limit)])
+    return run_script("telegram_language_sync.py", extra_args)
+
+
+def cmd_prometheus_alert_sync(args: argparse.Namespace) -> int:
+    extra_args = ["--prometheus-url", args.prometheus_url, "--webhook-url", args.webhook_url, "--lang", args.lang]
+    if args.status_output:
+        extra_args.extend(["--status-output", args.status_output])
+    if args.include_all:
+        extra_args.append("--include-all")
+    if args.dry_run:
+        extra_args.append("--dry-run")
+    return run_script("prometheus_alert_bridge.py", extra_args)
+
+
+def cmd_synthetic_recall(args: argparse.Namespace) -> int:
+    extra_args = []
+    if args.output:
+        extra_args.extend(["--output", args.output])
+    return run_script("synthetic_recall_benchmark.py", extra_args)
+
+
+def cmd_snapshot_compress(args: argparse.Namespace) -> int:
+    extra_args = ["--snapshot-dir", args.snapshot_dir]
+    if args.dry_run:
+        extra_args.append("--dry-run")
+    if args.remove_source:
+        extra_args.append("--remove-source")
+    return run_script("snapshot_compress.py", extra_args)
+
+
+def cmd_snapshot_restore(args: argparse.Namespace) -> int:
+    extra_args = ["--archive", args.archive, "--target-dir", args.target_dir]
+    if args.dry_run:
+        extra_args.append("--dry-run")
+    return run_script("snapshot_restore.py", extra_args)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Memory Sidecar CLI v3.5.1")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("doctor", help="Check whether the sidecar is installed")
+    sub.add_parser("profile", help="Print install profile metadata")
+    sub.add_parser("maintenance", help="Run one maintenance cycle")
+    acceptance = sub.add_parser("acceptance", help="Run the acceptance regression suite")
+    acceptance.add_argument("--mode", choices=["fast", "full"], default=os.environ.get("MEMORY_ACCEPTANCE_MODE", "full"))
+    gray_env = sub.add_parser("gray-env", help="Print environment variables for a gray deployment")
+    gray_env.add_argument("--gray-dir", help="Override the gray runtime directory")
+    report = sub.add_parser("report", help="Render an observability report from a governance DB")
+    report.add_argument("--db", help="Path to governance DB (defaults to agent home governance DB)")
+    report.add_argument("--format", choices=["json", "markdown"], default="json")
+    audit = sub.add_parser("audit-deploy", help="Audit deployed sidecar scripts, cron, and timers")
+    audit.add_argument("--repo-root", help="Repository root to compare deployed scripts against")
+    audit.add_argument("--format", choices=["json", "text"], default="json")
+    repo_audit = sub.add_parser("audit-repo", help="Audit repository hygiene for public release safety")
+    repo_audit.add_argument("--repo-root", help="Repository root to scan")
+    repo_audit.add_argument("--format", choices=["json", "text"], default="json")
+    manifest = sub.add_parser("manifest", help="Render a deploy manifest for the current runtime")
+    manifest.add_argument("--repo-root", help="Repository root to compare deployed scripts against")
+    manifest.add_argument("--format", choices=["json", "text"], default="json")
+    drift = sub.add_parser("drift-check", help="Check runtime-to-repository drift and write an operator status artifact")
+    drift.add_argument("--repo-root", help="Repository root to compare deployed scripts against")
+    drift.add_argument("--output", help="Output JSON path (defaults to AGENT_HOME metrics)")
+    drift.add_argument("--format", choices=["json", "text"], default="json")
+    drift.add_argument("--strict", action="store_true", help="Return non-zero when action-needed drift is found")
+    dashboard_info = sub.add_parser("dashboard-info", help="Print dashboard access metadata without exposing the token")
+    dashboard_info.add_argument("--url", default="http://127.0.0.1:9500/dashboard")
+    dashboard_info.add_argument("--token-file", help="Token file path (defaults to AGENT_HOME/private/dashboard-token)")
+    dashboard_info.add_argument("--format", choices=["json", "text"], default="text")
+    openmetrics = sub.add_parser("openmetrics", help="Export runtime metrics in OpenMetrics text format")
+    openmetrics.add_argument("--metrics-dir", help="Metrics artifact directory")
+    openmetrics.add_argument("--output", help="Write metrics to this path")
+    slo = sub.add_parser("slo-rollup", help="Roll up SLO metrics from existing runtime artifacts")
+    slo.add_argument("--metrics-dir", help="Metrics artifact directory")
+    slo.add_argument("--output", help="Write SLO rollup JSON to this path")
+    slo.add_argument("--history", help="SLO history JSONL path")
+    slo.add_argument("--no-history", action="store_true")
+    status = sub.add_parser("status", help="Print a one-line operator status summary")
+    status.add_argument("--metrics-dir", help="Metrics artifact directory")
+    replay = sub.add_parser("replay-dead-letter", help="Replay failed external alert forwards")
+    replay.add_argument("--dead-letter", help="Dead-letter JSONL path")
+    replay.add_argument("--forward-url", default=os.environ.get("MEMORY_ALERT_FORWARD_URL", ""))
+    replay.add_argument("--forward-kind", default=os.environ.get("MEMORY_ALERT_FORWARD_KIND", ""))
+    replay.add_argument("--forward-timeout", type=int, default=10)
+    replay.add_argument("--retry-attempts", type=int, default=int(os.environ.get("MEMORY_ALERT_FORWARD_RETRY_ATTEMPTS", "3")))
+    replay.add_argument("--retry-backoff-s", type=float, default=float(os.environ.get("MEMORY_ALERT_FORWARD_RETRY_BACKOFF_S", "1.0")))
+    replay.add_argument("--max-replay", type=int, default=100)
+    replay.add_argument("--dry-run", action="store_true")
+    replay.add_argument("--output", help="Write replay report JSON (defaults to AGENT_HOME metrics)")
+    telegram_sync = sub.add_parser("telegram-lang-sync", help="Learn Telegram chat language from bot updates")
+    telegram_sync.add_argument("--map-path", default=str(AGENT_HOME / "private" / "telegram-chat-languages.json"))
+    telegram_sync.add_argument("--offset-path", default=str(AGENT_HOME / "private" / "telegram-updates-offset"))
+    telegram_sync.add_argument("--limit", type=int, default=100)
+    prom_sync = sub.add_parser("prometheus-alert-sync", help="Bridge firing Prometheus alerts into the local webhook pipeline")
+    prom_sync.add_argument("--prometheus-url", default=os.environ.get("MEMORY_PROMETHEUS_URL", "http://127.0.0.1:9090"))
+    prom_sync.add_argument("--webhook-url", default=os.environ.get("MEMORY_ALERT_LOCAL_WEBHOOK_URL", "http://127.0.0.1:9499/alerts"))
+    prom_sync.add_argument("--lang", default=os.environ.get("MEMORY_ALERT_LANG", "zh"))
+    prom_sync.add_argument("--status-output", default=str(AGENT_HOME / "metrics" / "prometheus-alert-bridge-latest.json"))
+    prom_sync.add_argument("--include-all", action="store_true", help="Forward every firing Prometheus alert instead of memory-related alerts only")
+    prom_sync.add_argument("--dry-run", action="store_true")
+    synthetic = sub.add_parser("synthetic-recall", help="Run public synthetic recall regression benchmark")
+    synthetic.add_argument("--output", help="Write JSON result to this path")
+    snap_compress = sub.add_parser("snapshot-compress", help="Compress a runtime snapshot directory into a tar.gz archive")
+    snap_compress.add_argument("--snapshot-dir", required=True)
+    snap_compress.add_argument("--dry-run", action="store_true")
+    snap_compress.add_argument("--remove-source", action="store_true")
+    snap_restore = sub.add_parser("snapshot-restore", help="Restore a compressed runtime snapshot archive")
+    snap_restore.add_argument("--archive", required=True)
+    snap_restore.add_argument("--target-dir", required=True)
+    snap_restore.add_argument("--dry-run", action="store_true")
+
+    args = parser.parse_args()
+    if args.command == "doctor":
+        return cmd_doctor(args)
+    if args.command == "profile":
+        return cmd_profile(args)
+    if args.command == "maintenance":
+        return cmd_maintenance(args)
+    if args.command == "acceptance":
+        return cmd_acceptance(args)
+    if args.command == "gray-env":
+        return cmd_gray_env(args)
+    if args.command == "report":
+        return cmd_report(args)
+    if args.command == "audit-deploy":
+        return cmd_audit_deploy(args)
+    if args.command == "audit-repo":
+        return cmd_audit_repo(args)
+    if args.command == "manifest":
+        return cmd_manifest(args)
+    if args.command == "drift-check":
+        return cmd_drift_check(args)
+    if args.command == "dashboard-info":
+        return cmd_dashboard_info(args)
+    if args.command == "openmetrics":
+        return cmd_openmetrics(args)
+    if args.command == "slo-rollup":
+        return cmd_slo_rollup(args)
+    if args.command == "status":
+        return cmd_status(args)
+    if args.command == "replay-dead-letter":
+        return cmd_replay_dead_letter(args)
+    if args.command == "telegram-lang-sync":
+        return cmd_telegram_lang_sync(args)
+    if args.command == "prometheus-alert-sync":
+        return cmd_prometheus_alert_sync(args)
+    if args.command == "synthetic-recall":
+        return cmd_synthetic_recall(args)
+    if args.command == "snapshot-compress":
+        return cmd_snapshot_compress(args)
+    if args.command == "snapshot-restore":
+        return cmd_snapshot_restore(args)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
